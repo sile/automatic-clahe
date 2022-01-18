@@ -65,7 +65,7 @@ impl AutomaticClahe {
 
             // dual gamma correction
             let pdf = Pdf::new(block.pixels(&luminances));
-            let pdf = pdf.redistribute(beta);
+            let pdf = pdf.redistribute(beta / block.len() as f32);
             let cdf = Cdf::new(&pdf);
             let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
             let r = l_max - l_min;
@@ -231,7 +231,21 @@ impl Pdf {
     }
 
     fn redistribute(&self, beta: f32) -> Self {
-        todo!()
+        let mut pdf = self.0;
+        let mut exceeded = 0.0;
+        for x in &mut pdf {
+            if *x > beta {
+                exceeded += *x - beta;
+                *x = beta;
+            }
+        }
+        if exceeded > 0.0 {
+            let offset = exceeded / 256.0;
+            for x in &mut pdf {
+                *x += offset;
+            }
+        }
+        Self(pdf)
     }
 }
 
