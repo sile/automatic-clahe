@@ -33,7 +33,7 @@ impl AutomaticClahe {
 
     pub fn enhance_rgba_image(&self, pixels: &mut [u8], width: usize) {
         const N: usize = 4;
-        let luminances = pixels
+        let mut luminances = pixels
             .chunks(N)
             .map(|p| std::cmp::max(p[0], std::cmp::max(p[1], p[2])))
             .collect::<Vec<_>>();
@@ -70,7 +70,8 @@ impl AutomaticClahe {
             let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
             let r = l_max - l_min;
 
-            for l in block.pixels(&luminances) {
+            for li in block.pixel_indices() {
+                let l = luminances[li];
                 let w_en = (g_l_max / g_l_alpha).powf(1.0 - cdf.gamma_1(l));
                 let l1 = l_max * w_en * cdf.0[usize::from(l)];
                 let l2 = g_l_max * (f32::from(l) / g_l_max).powf(cdf_w.gamma_2(1));
@@ -79,8 +80,11 @@ impl AutomaticClahe {
                 } else {
                     l2
                 };
+                luminances[li] = enhanced_l as u8; // TODO: range check
             }
         }
+
+        // bilinear interpolation
     }
 
     pub fn enhance_rgb_image(&self, _pixels: &mut [u8], _width: usize) {
@@ -178,6 +182,14 @@ impl Region {
         (self.start.y..self.end.y).flat_map(move |y| {
             let offset = y * width;
             (pixels[offset..][self.start.x..self.end.x]).iter().copied()
+        })
+    }
+
+    fn pixel_indices(self) -> impl Iterator<Item = usize> {
+        let width = self.end.x - self.start.x;
+        (self.start.y..self.end.y).flat_map(move |y| {
+            let offset = y * width;
+            offset + self.start.x..offset + self.end.x
         })
     }
 }
