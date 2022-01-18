@@ -37,6 +37,7 @@ impl AutomaticClahe {
             .chunks(N)
             .map(|p| std::cmp::max(p[0], std::cmp::max(p[1], p[2])))
             .collect::<Vec<_>>();
+        let height = pixels.len() / N / width;
 
         let g_pdf = Pdf::new(luminances.iter().copied());
         let g_cdf = Cdf::new(&g_pdf);
@@ -47,6 +48,7 @@ impl AutomaticClahe {
             .position(|&x| x >= 0.75) // TODO
             .expect("unreachable") as f32;
 
+        let mut block_cdfs: Vec<BlockCdf> = Vec::new();
         for block in Blocks::new(
             pixels.len() / N,
             width,
@@ -70,21 +72,105 @@ impl AutomaticClahe {
             let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
             let r = l_max - l_min;
 
-            for li in block.pixel_indices() {
-                let l = luminances[li];
-                let w_en = (g_l_max / g_l_alpha).powf(1.0 - cdf.gamma_1(l));
-                let l1 = l_max * w_en * cdf.0[usize::from(l)];
-                let l2 = g_l_max * (f32::from(l) / g_l_max).powf(cdf_w.gamma_2(1));
-                let enhanced_l = if r > self.options.d_threshold {
-                    l1.max(l2)
-                } else {
-                    l2
-                };
-                luminances[li] = enhanced_l as u8; // TODO: range check
-            }
+            block_cdfs.push(BlockCdf {
+                region: block,
+                cdf,
+                cdf_w,
+                use_cdf_w: r > self.options.d_threshold,
+            });
+            // for li in block.pixel_indices() {
+            //     let l = luminances[li];
+            //     let w_en = (g_l_max / g_l_alpha).powf(1.0 - cdf.gamma_1(l));
+            //     let l1 = l_max * w_en * cdf.0[usize::from(l)];
+            //     let l2 = g_l_max * (f32::from(l) / g_l_max).powf(cdf_w.gamma_2(1));
+            //     let enhanced_l = if r > self.options.d_threshold {
+            //         l1.max(l2)
+            //     } else {
+            //         l2
+            //     };
+            //     luminances[li] = enhanced_l as u8; // TODO: range check
+            // }
         }
 
         // bilinear interpolation
+        for y in 0..height {
+            for x in 0..width {
+                let a = self.get_block_a(y, x, width, &block_cdfs);
+                let b = self.get_block_b(y, x, width, &block_cdfs);
+                let c = self.get_block_c(y, x, width, height, &block_cdfs);
+                let d = self.get_block_d(y, x, width, height, &block_cdfs);
+            }
+        }
+    }
+
+    fn get_block_a<'a>(
+        &self,
+        y: usize,
+        x: usize,
+        w: usize,
+        block_cdfs: &'a [BlockCdf],
+    ) -> Option<&'a BlockCdf> {
+        if y < self.options.block_height / 2 || x < self.options.block_width / 2 {
+            return None;
+        }
+
+        let block_y = (y - self.options.block_height / 2) / self.options.block_height;
+        let block_x = (x - self.options.block_width / 2) / self.options.block_width;
+        let block_w = w / self.options.block_width;
+        Some(&block_cdfs[block_y * block_w + block_x])
+    }
+
+    fn get_block_b<'a>(
+        &self,
+        y: usize,
+        x: usize,
+        w: usize,
+        block_cdfs: &'a [BlockCdf],
+    ) -> Option<&'a BlockCdf> {
+        if y < self.options.block_height / 2 || w < (x + self.options.block_width / 2) {
+            return None;
+        }
+
+        let block_y = (y - self.options.block_height / 2) / self.options.block_height;
+        let block_x = (x + self.options.block_width / 2) / self.options.block_width;
+        let block_w = w / self.options.block_width;
+        Some(&block_cdfs[block_y * block_w + block_x])
+    }
+
+    fn get_block_c<'a>(
+        &self,
+        y: usize,
+        x: usize,
+        w: usize,
+        h: usize,
+        block_cdfs: &'a [BlockCdf],
+    ) -> Option<&'a BlockCdf> {
+        if h < (y + self.options.block_height / 2) || x < self.options.block_width / 2 {
+            return None;
+        }
+
+        let block_y = (y + self.options.block_height / 2) / self.options.block_height;
+        let block_x = (x - self.options.block_width / 2) / self.options.block_width;
+        let block_w = w / self.options.block_width;
+        Some(&block_cdfs[block_y * block_w + block_x])
+    }
+
+    fn get_block_d<'a>(
+        &self,
+        y: usize,
+        x: usize,
+        w: usize,
+        h: usize,
+        block_cdfs: &'a [BlockCdf],
+    ) -> Option<&'a BlockCdf> {
+        if h < (y + self.options.block_height / 2) || w < (x + self.options.block_width / 2) {
+            return None;
+        }
+
+        let block_y = (y + self.options.block_height / 2) / self.options.block_height;
+        let block_x = (x + self.options.block_width / 2) / self.options.block_width;
+        let block_w = w / self.options.block_width;
+        Some(&block_cdfs[block_y * block_w + block_x])
     }
 
     pub fn enhance_rgb_image(&self, _pixels: &mut [u8], _width: usize) {
@@ -164,6 +250,14 @@ impl Iterator for Blocks {
 
         Some(Region { start, end })
     }
+}
+
+#[derive(Debug)]
+pub struct BlockCdf {
+    cdf: Cdf,
+    cdf_w: Cdf,
+    use_cdf_w: bool,
+    region: Region,
 }
 
 #[derive(Debug, Clone, Copy)]
