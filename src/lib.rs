@@ -1,3 +1,5 @@
+mod color_format;
+
 #[derive(Debug, Clone)]
 pub struct AutomaticClaheOptions {
     block_width: usize,
@@ -33,7 +35,7 @@ impl AutomaticClahe {
 
     pub fn enhance_rgba_image(&self, pixels: &mut [u8], width: usize) {
         const N: usize = 4;
-        let mut luminances = pixels
+        let luminances = pixels
             .chunks(N)
             .map(|p| std::cmp::max(p[0], std::cmp::max(p[1], p[2])))
             .collect::<Vec<_>>();
@@ -74,22 +76,11 @@ impl AutomaticClahe {
 
             block_cdfs.push(BlockCdf {
                 region: block,
+                l_max,
                 cdf,
                 cdf_w,
                 use_cdf_w: r > self.options.d_threshold,
             });
-            // for li in block.pixel_indices() {
-            //     let l = luminances[li];
-            //     let w_en = (g_l_max / g_l_alpha).powf(1.0 - cdf.gamma_1(l));
-            //     let l1 = l_max * w_en * cdf.0[usize::from(l)];
-            //     let l2 = g_l_max * (f32::from(l) / g_l_max).powf(cdf_w.gamma_2(1));
-            //     let enhanced_l = if r > self.options.d_threshold {
-            //         l1.max(l2)
-            //     } else {
-            //         l2
-            //     };
-            //     luminances[li] = enhanced_l as u8; // TODO: range check
-            // }
         }
 
         // bilinear interpolation
@@ -99,6 +90,38 @@ impl AutomaticClahe {
                 let b = self.get_block_b(y, x, width, &block_cdfs);
                 let c = self.get_block_c(y, x, width, height, &block_cdfs);
                 let d = self.get_block_d(y, x, width, height, &block_cdfs);
+
+                let m = match (a.map(|a| a.center_y()), c.map(|c| c.center_y())) {
+                    (Some(a), Some(c)) => (c - y) as f32 / (c - a) as f32,
+                    (Some(_), _) => 1.0,
+                    _ => 0.0,
+                };
+                let n = match (a.map(|a| a.center_x()), b.map(|b| b.center_x())) {
+                    (Some(a), Some(b)) => (b - x) as f32 / (b - a) as f32,
+                    (Some(_), _) => 1.0,
+                    _ => 0.0,
+                };
+
+                let l0 = luminances[y * width + x];
+                let l = m
+                    * (a.map(|a| n * a.enhance(l0, g_l_max, g_l_alpha))
+                        .unwrap_or(0.0)
+                        + b.map(|b| (1.0 - n) * b.enhance(l0, g_l_max, g_l_alpha))
+                            .unwrap_or(0.0))
+                    + (1.0 - m)
+                        * (c.map(|c| n * c.enhance(l0, g_l_max, g_l_alpha))
+                            .unwrap_or(0.0)
+                            + (1.0 - n)
+                                * d.map(|d| (1.0 - n) * d.enhance(l0, g_l_max, g_l_alpha))
+                                    .unwrap_or(0.0));
+
+                let i = (y * width + x) * N;
+                let (h, s, _) =
+                    self::color_format::rgb_to_hsv(pixels[i], pixels[i + 1], pixels[i + 2]);
+                let (r, g, b) = self::color_format::hsv_to_rgb(h, s, l.max(0.0).min(255.0) as u8); // TODO
+                pixels[i] = r;
+                pixels[i + 1] = g;
+                pixels[i + 2] = b;
             }
         }
     }
@@ -256,8 +279,31 @@ impl Iterator for Blocks {
 pub struct BlockCdf {
     cdf: Cdf,
     cdf_w: Cdf,
-    use_cdf_w: bool,
+    use_cdf_w: bool, // TODO: rename
     region: Region,
+    l_max: f32,
+}
+
+impl BlockCdf {
+    fn center_y(&self) -> usize {
+        (self.region.end.y - self.region.start.y) / 2 + self.region.start.y
+    }
+
+    fn center_x(&self) -> usize {
+        (self.region.end.x - self.region.start.x) / 2 + self.region.start.x
+    }
+
+    fn enhance(&self, l: u8, g_l_max: f32, g_l_alpha: f32) -> f32 {
+        let l2 = g_l_max * (f32::from(l) / g_l_max).powf(self.cdf_w.gamma_2(1));
+        let enhanced_l = if self.use_cdf_w {
+            let w_en = (g_l_max / g_l_alpha).powf(1.0 - self.cdf.gamma_1(l));
+            let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
+            l1.max(l2)
+        } else {
+            l2
+        };
+        enhanced_l // TODO: range check
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -276,14 +322,6 @@ impl Region {
         (self.start.y..self.end.y).flat_map(move |y| {
             let offset = y * width;
             (pixels[offset..][self.start.x..self.end.x]).iter().copied()
-        })
-    }
-
-    fn pixel_indices(self) -> impl Iterator<Item = usize> {
-        let width = self.end.x - self.start.x;
-        (self.start.y..self.end.y).flat_map(move |y| {
-            let offset = y * width;
-            offset + self.start.x..offset + self.end.x
         })
     }
 }
