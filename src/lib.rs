@@ -132,7 +132,7 @@ impl AutomaticClahe {
                 let ld = d
                     .map(|d| (1.0 - n) * d.enhance(l0, g_l_max, g_l_alpha))
                     .unwrap_or(0.0);
-                let l = m * (la + lb) + (1.0 - m) * (lc + (1.0 - n) * ld);
+                let l = m * (la + lb) + (1.0 - m) * (lc + ld);
 
                 // dbg!((m, n));
                 // dbg!((la, lb, lc, ld));
