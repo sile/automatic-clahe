@@ -86,35 +86,58 @@ impl AutomaticClahe {
         // bilinear interpolation
         for y in 0..height {
             for x in 0..width {
-                let a = self.get_block_a(y, x, width, &block_cdfs);
-                let b = self.get_block_b(y, x, width, &block_cdfs);
+                let a = self.get_block_a(y, x, width, height, &block_cdfs);
+                let b = self.get_block_b(y, x, width, height, &block_cdfs);
                 let c = self.get_block_c(y, x, width, height, &block_cdfs);
                 let d = self.get_block_d(y, x, width, height, &block_cdfs);
 
+                // dbg!((y, x));
+                // dbg!(a.map(|a| (a.center_y(), a.center_x())));
+                // dbg!(b.map(|b| (b.center_y(), b.center_x())));
+                // dbg!(c.map(|c| (c.center_y(), c.center_x())));
+                // dbg!(d.map(|d| (d.center_y(), d.center_x())));
+
                 let m = match (a.map(|a| a.center_y()), c.map(|c| c.center_y())) {
                     (Some(a), Some(c)) => (c - y) as f32 / (c - a) as f32,
-                    (Some(_), _) => 1.0,
-                    _ => 0.0,
+                    _ => {
+                        if a.is_some() || b.is_some() {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                 };
                 let n = match (a.map(|a| a.center_x()), b.map(|b| b.center_x())) {
                     (Some(a), Some(b)) => (b - x) as f32 / (b - a) as f32,
-                    (Some(_), _) => 1.0,
-                    _ => 0.0,
+                    _ => {
+                        if a.is_some() || c.is_some() {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                 };
 
                 let l0 = luminances[y * width + x];
-                let l = m
-                    * (a.map(|a| n * a.enhance(l0, g_l_max, g_l_alpha))
-                        .unwrap_or(0.0)
-                        + b.map(|b| (1.0 - n) * b.enhance(l0, g_l_max, g_l_alpha))
-                            .unwrap_or(0.0))
-                    + (1.0 - m)
-                        * (c.map(|c| n * c.enhance(l0, g_l_max, g_l_alpha))
-                            .unwrap_or(0.0)
-                            + (1.0 - n)
-                                * d.map(|d| (1.0 - n) * d.enhance(l0, g_l_max, g_l_alpha))
-                                    .unwrap_or(0.0));
 
+                let la = a
+                    .map(|a| n * a.enhance(l0, g_l_max, g_l_alpha))
+                    .unwrap_or(0.0);
+                let lb = b
+                    .map(|b| (1.0 - n) * b.enhance(l0, g_l_max, g_l_alpha))
+                    .unwrap_or(0.0);
+                let lc = c
+                    .map(|c| n * c.enhance(l0, g_l_max, g_l_alpha))
+                    .unwrap_or(0.0);
+                let ld = d
+                    .map(|d| (1.0 - n) * d.enhance(l0, g_l_max, g_l_alpha))
+                    .unwrap_or(0.0);
+                let l = m * (la + lb) + (1.0 - m) * (lc + (1.0 - n) * ld);
+
+                // dbg!((m, n));
+                // dbg!((la, lb, lc, ld));
+                // dbg!((a.is_some(), b.is_some(), c.is_some(), d.is_some()));
+                // dbg!((l0, l));
                 let i = (y * width + x) * N;
                 let (h, s, _) =
                     self::color_format::rgb_to_hsv(pixels[i], pixels[i + 1], pixels[i + 2]);
@@ -122,17 +145,26 @@ impl AutomaticClahe {
                 pixels[i] = r;
                 pixels[i + 1] = g;
                 pixels[i + 2] = b;
+                //break;
             }
+            //break;
         }
     }
 
     fn get_block_a<'a>(
         &self,
-        y: usize,
-        x: usize,
-        w: usize,
+        mut y: usize,
+        mut x: usize,
+        mut w: usize,
+        mut h: usize,
         block_cdfs: &'a [BlockCdf],
     ) -> Option<&'a BlockCdf> {
+        // TODO: handle edges correctly
+        h = h / self.options.block_height * self.options.block_height;
+        w = w / self.options.block_width * self.options.block_width;
+        y = std::cmp::min(y, h - 1);
+        x = std::cmp::min(x, w - 1);
+
         if y < self.options.block_height / 2 || x < self.options.block_width / 2 {
             return None;
         }
@@ -145,12 +177,19 @@ impl AutomaticClahe {
 
     fn get_block_b<'a>(
         &self,
-        y: usize,
-        x: usize,
-        w: usize,
+        mut y: usize,
+        mut x: usize,
+        mut w: usize,
+        mut h: usize,
         block_cdfs: &'a [BlockCdf],
     ) -> Option<&'a BlockCdf> {
-        if y < self.options.block_height / 2 || w < (x + self.options.block_width / 2) {
+        // TODO: handle edges correctly
+        h = h / self.options.block_height * self.options.block_height;
+        w = w / self.options.block_width * self.options.block_width;
+        y = std::cmp::min(y, h - 1);
+        x = std::cmp::min(x, w - 1);
+
+        if y < self.options.block_height / 2 || w <= (x + self.options.block_width / 2) {
             return None;
         }
 
@@ -162,13 +201,19 @@ impl AutomaticClahe {
 
     fn get_block_c<'a>(
         &self,
-        y: usize,
-        x: usize,
-        w: usize,
-        h: usize,
+        mut y: usize,
+        mut x: usize,
+        mut w: usize,
+        mut h: usize,
         block_cdfs: &'a [BlockCdf],
     ) -> Option<&'a BlockCdf> {
-        if h < (y + self.options.block_height / 2) || x < self.options.block_width / 2 {
+        // TODO: handle edges correctly
+        h = h / self.options.block_height * self.options.block_height;
+        w = w / self.options.block_width * self.options.block_width;
+        y = std::cmp::min(y, h - 1);
+        x = std::cmp::min(x, w - 1);
+
+        if h <= (y + self.options.block_height / 2) || x < self.options.block_width / 2 {
             return None;
         }
 
@@ -180,19 +225,30 @@ impl AutomaticClahe {
 
     fn get_block_d<'a>(
         &self,
-        y: usize,
-        x: usize,
-        w: usize,
-        h: usize,
+        mut y: usize,
+        mut x: usize,
+        mut w: usize,
+        mut h: usize,
         block_cdfs: &'a [BlockCdf],
     ) -> Option<&'a BlockCdf> {
-        if h < (y + self.options.block_height / 2) || w < (x + self.options.block_width / 2) {
+        // TODO: handle edges correctly
+        h = h / self.options.block_height * self.options.block_height;
+        w = w / self.options.block_width * self.options.block_width;
+        y = std::cmp::min(y, h - 1);
+        x = std::cmp::min(x, w - 1);
+
+        if h <= (y + self.options.block_height / 2) || w <= (x + self.options.block_width / 2) {
             return None;
         }
 
         let block_y = (y + self.options.block_height / 2) / self.options.block_height;
         let block_x = (x + self.options.block_width / 2) / self.options.block_width;
         let block_w = w / self.options.block_width;
+        if block_y * block_w + block_x == block_cdfs.len() {
+            dbg!((y, x, h, w));
+            dbg!((block_y, block_w, block_x));
+            dbg!(block_y * block_w + block_x);
+        }
         Some(&block_cdfs[block_y * block_w + block_x])
     }
 
@@ -296,8 +352,12 @@ impl BlockCdf {
     fn enhance(&self, l: u8, g_l_max: f32, g_l_alpha: f32) -> f32 {
         let l2 = g_l_max * (f32::from(l) / g_l_max).powf(self.cdf_w.gamma_2(1));
         let enhanced_l = if self.use_cdf_w {
-            let w_en = (g_l_max / g_l_alpha).powf(1.0 - self.cdf.gamma_1(l));
+            //let w_en = (g_l_max / g_l_alpha).powf(1.0 - self.cdf.gamma_1(l));
+            let w_en = (g_l_max / g_l_alpha).powf(self.cdf.gamma_1(l));
+            //dbg!((g_l_max, g_l_alpha, w_en, self.cdf.gamma_1(l), l));
+            //dbg!((self.l_max, w_en, self.cdf.0[usize::from(l)]));
             let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
+            //dbg!((l1, l2));
             l1.max(l2)
         } else {
             l2
