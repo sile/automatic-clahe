@@ -6,7 +6,7 @@ pub struct AutomaticClaheOptions {
     block_height: usize,
     alpha: f32,
     p: f32,
-    d_threshold: f32,
+    d_threshold: f32, // TODO: u8
 }
 
 impl Default for AutomaticClaheOptions {
@@ -17,6 +17,42 @@ impl Default for AutomaticClaheOptions {
             alpha: 100.0,
             p: 1.5,
             d_threshold: 50.0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Image<'a, const N: usize> {
+    pixels: &'a mut [u8],
+    width: usize,
+    height: usize,
+    luminances: Vec<u8>,
+    l_max: f32,
+    enhancement_weight_factor: f32,
+}
+
+impl<'a, const N: usize> Image<'a, N> {
+    fn new(pixels: &'a mut [u8], width: usize) -> Self {
+        let mut luminances = Vec::with_capacity(pixels.len() / N);
+        let mut l_max = 0;
+        for p in pixels.chunks(N) {
+            let l = std::cmp::max(p[0], std::cmp::max(p[1], p[2]));
+            luminances.push(l);
+            l_max = std::cmp::max(l, l_max);
+        }
+        let l_max = f32::from(l_max);
+
+        let pdf = Pdf::new(luminances.iter().copied());
+        let cdf = Cdf::new(&pdf);
+        let l_alpha = cdf.0.iter().take_while(|&&x| x <= 0.75).count() as f32;
+
+        Self {
+            pixels,
+            width,
+            height: luminances.len() / width,
+            luminances,
+            l_max,
+            enhancement_weight_factor: l_max / l_alpha,
         }
     }
 }
@@ -34,41 +70,28 @@ impl AutomaticClahe {
     }
 
     pub fn enhance_rgba_image(&self, pixels: &mut [u8], width: usize) {
-        const N: usize = 4;
-        let luminances = pixels
-            .chunks(N)
-            .map(|p| std::cmp::max(p[0], std::cmp::max(p[1], p[2])))
-            .collect::<Vec<_>>();
-        let height = pixels.len() / N / width;
-
-        let g_pdf = Pdf::new(luminances.iter().copied());
-        let g_cdf = Cdf::new(&g_pdf);
-        let g_l_max = f32::from(luminances.iter().copied().max().unwrap_or(0));
-        let g_l_alpha = g_cdf
-            .0
-            .iter()
-            .position(|&x| x >= 0.75) // TODO
-            .expect("unreachable") as f32;
+        let image = Image::<4>::new(pixels, width);
+        let height = image.height;
 
         let mut block_cdfs: Vec<BlockCdf> = Vec::new();
         for block in Blocks::new(
-            pixels.len() / N,
+            image.luminances.len(),
             width,
             self.options.block_width,
             self.options.block_height,
         ) {
             // clip point
-            let avg = mean(block.pixels(&luminances));
-            let sigma = stddev(block.pixels(&luminances), avg);
-            let l_max = f32::from(block.pixels(&luminances).max().unwrap_or(0));
-            let l_min = f32::from(block.pixels(&luminances).min().unwrap_or(0));
+            let avg = mean(block.pixels(&image.luminances));
+            let sigma = stddev(block.pixels(&image.luminances), avg);
+            let l_max = f32::from(block.pixels(&image.luminances).max().unwrap_or(0));
+            let l_min = f32::from(block.pixels(&image.luminances).min().unwrap_or(0));
             let beta = block.len() as f32 / (l_max - l_min + f32::EPSILON)
                 * (1.0
                     + self.options.p * l_max / f32::from(u8::MAX)
                     + (self.options.alpha / 100.0) * (sigma / (avg + f32::EPSILON)));
 
             // dual gamma correction
-            let pdf = Pdf::new(block.pixels(&luminances));
+            let pdf = Pdf::new(block.pixels(&image.luminances));
             let pdf = pdf.redistribute(beta / block.len() as f32);
             let cdf = Cdf::new(&pdf);
             let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
@@ -84,18 +107,12 @@ impl AutomaticClahe {
         }
 
         // bilinear interpolation
-        for y in 0..height {
-            for x in 0..width {
+        for y in 0..image.height {
+            for x in 0..image.width {
                 let a = self.get_block_a(y, x, width, height, &block_cdfs);
                 let b = self.get_block_b(y, x, width, height, &block_cdfs);
                 let c = self.get_block_c(y, x, width, height, &block_cdfs);
                 let d = self.get_block_d(y, x, width, height, &block_cdfs);
-
-                // dbg!((y, x));
-                // dbg!(a.map(|a| (a.center_y(), a.center_x())));
-                // dbg!(b.map(|b| (b.center_y(), b.center_x())));
-                // dbg!(c.map(|c| (c.center_y(), c.center_x())));
-                // dbg!(d.map(|d| (d.center_y(), d.center_x())));
 
                 let m = match (a.map(|a| a.center_y()), c.map(|c| c.center_y())) {
                     (Some(a), Some(c)) => (c - y) as f32 / (c - a) as f32,
@@ -118,36 +135,25 @@ impl AutomaticClahe {
                     }
                 };
 
-                let l0 = luminances[y * width + x];
+                let l0 = image.luminances[y * width + x];
 
-                let la = a
-                    .map(|a| n * a.enhance(l0, g_l_max, g_l_alpha))
-                    .unwrap_or(0.0);
-                let lb = b
-                    .map(|b| (1.0 - n) * b.enhance(l0, g_l_max, g_l_alpha))
-                    .unwrap_or(0.0);
-                let lc = c
-                    .map(|c| n * c.enhance(l0, g_l_max, g_l_alpha))
-                    .unwrap_or(0.0);
-                let ld = d
-                    .map(|d| (1.0 - n) * d.enhance(l0, g_l_max, g_l_alpha))
-                    .unwrap_or(0.0);
+                let la = a.map(|a| n * a.enhance(l0, &image)).unwrap_or(0.0);
+                let lb = b.map(|b| (1.0 - n) * b.enhance(l0, &image)).unwrap_or(0.0);
+                let lc = c.map(|c| n * c.enhance(l0, &image)).unwrap_or(0.0);
+                let ld = d.map(|d| (1.0 - n) * d.enhance(l0, &image)).unwrap_or(0.0);
                 let l = m * (la + lb) + (1.0 - m) * (lc + ld);
 
-                // dbg!((m, n));
-                // dbg!((la, lb, lc, ld));
-                // dbg!((a.is_some(), b.is_some(), c.is_some(), d.is_some()));
-                // dbg!((l0, l));
-                let i = (y * width + x) * N;
-                let (h, s, _) =
-                    self::color_format::rgb_to_hsv(pixels[i], pixels[i + 1], pixels[i + 2]);
+                let i = (y * width + x) * 4; // TODO
+                let (h, s, _) = self::color_format::rgb_to_hsv(
+                    image.pixels[i],
+                    image.pixels[i + 1],
+                    image.pixels[i + 2],
+                );
                 let (r, g, b) = self::color_format::hsv_to_rgb(h, s, l.max(0.0).min(255.0) as u8); // TODO
-                pixels[i] = r;
-                pixels[i + 1] = g;
-                pixels[i + 2] = b;
-                //break;
+                image.pixels[i] = r;
+                image.pixels[i + 1] = g;
+                image.pixels[i + 2] = b;
             }
-            //break;
         }
     }
 
@@ -349,15 +355,11 @@ impl BlockCdf {
         (self.region.end.x - self.region.start.x) / 2 + self.region.start.x
     }
 
-    fn enhance(&self, l: u8, g_l_max: f32, g_l_alpha: f32) -> f32 {
-        let l2 = g_l_max * (f32::from(l) / g_l_max).powf(self.cdf_w.gamma_2(1));
+    fn enhance<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
+        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(1));
         let enhanced_l = if self.use_cdf_w {
-            //let w_en = (g_l_max / g_l_alpha).powf(1.0 - self.cdf.gamma_1(l));
-            let w_en = (g_l_max / g_l_alpha).powf(self.cdf.gamma_1(l));
-            //dbg!((g_l_max, g_l_alpha, w_en, self.cdf.gamma_1(l), l));
-            //dbg!((self.l_max, w_en, self.cdf.0[usize::from(l)]));
+            let w_en = image.enhancement_weight_factor.powf(self.cdf.gamma_1(l));
             let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
-            //dbg!((l1, l2));
             l1.max(l2)
         } else {
             l2
