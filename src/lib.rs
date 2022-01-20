@@ -6,7 +6,7 @@ pub struct AutomaticClaheOptions {
     block_height: usize,
     alpha: f32,
     p: f32,
-    d_threshold: f32, // TODO: u8
+    d_threshold: u8,
 }
 
 impl Default for AutomaticClaheOptions {
@@ -16,7 +16,7 @@ impl Default for AutomaticClaheOptions {
             block_height: 32,
             alpha: 100.0,
             p: 1.5,
-            d_threshold: 50.0,
+            d_threshold: 50,
         }
     }
 }
@@ -58,6 +58,58 @@ impl<'a, const N: usize> Image<'a, N> {
 }
 
 #[derive(Debug)]
+struct Block {
+    enable_dual_gamma_correction: bool,
+    l_max: f32,
+    region: Region,
+    cdf: Cdf,
+    cdf_w: Cdf,
+}
+
+impl Block {
+    fn new<const N: usize>(
+        image: &Image<N>,
+        options: &AutomaticClaheOptions,
+        region: Region,
+    ) -> Self {
+        let mut l_sum = 0;
+        let mut l_max = 0;
+        let mut l_min = u8::MAX;
+        for l in region.items(&image.luminances) {
+            l_sum += usize::from(l);
+            l_max = std::cmp::max(l_max, l);
+            l_min = std::cmp::min(l_min, l);
+        }
+        let m = region.len() as f32;
+        let avg = l_sum as f32 / m;
+        let sigma = (region
+            .items(&image.luminances)
+            .map(|l| (f32::from(l) - avg).powi(2))
+            .sum::<f32>()
+            / m)
+            .sqrt();
+        let n = f32::from(l_max - l_min) + f32::EPSILON;
+
+        let clip_point = (1.0
+            + options.p * f32::from(l_max) / f32::from(u8::MAX)
+            + (options.alpha / 100.0) * (sigma / (avg + f32::EPSILON)))
+            / n;
+
+        let pdf = Pdf::new(region.items(&image.luminances)).redistribute(clip_point);
+        let cdf = Cdf::new(&pdf);
+        let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
+
+        Self {
+            enable_dual_gamma_correction: (l_max - l_min) > options.d_threshold,
+            l_max: f32::from(l_max),
+            region,
+            cdf,
+            cdf_w,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct AutomaticClahe {
     options: AutomaticClaheOptions,
 }
@@ -71,40 +123,9 @@ impl AutomaticClahe {
 
     pub fn enhance_rgba_image(&self, pixels: &mut [u8], width: usize) {
         let image = Image::<4>::new(pixels, width);
-        let height = image.height;
-
-        let mut block_cdfs: Vec<BlockCdf> = Vec::new();
-        for block in Blocks::new(
-            image.luminances.len(),
-            width,
-            self.options.block_width,
-            self.options.block_height,
-        ) {
-            // clip point
-            let avg = mean(block.pixels(&image.luminances));
-            let sigma = stddev(block.pixels(&image.luminances), avg);
-            let l_max = f32::from(block.pixels(&image.luminances).max().unwrap_or(0));
-            let l_min = f32::from(block.pixels(&image.luminances).min().unwrap_or(0));
-            let beta = block.len() as f32 / (l_max - l_min + f32::EPSILON)
-                * (1.0
-                    + self.options.p * l_max / f32::from(u8::MAX)
-                    + (self.options.alpha / 100.0) * (sigma / (avg + f32::EPSILON)));
-
-            // dual gamma correction
-            let pdf = Pdf::new(block.pixels(&image.luminances));
-            let pdf = pdf.redistribute(beta / block.len() as f32);
-            let cdf = Cdf::new(&pdf);
-            let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
-            let r = l_max - l_min;
-
-            block_cdfs.push(BlockCdf {
-                region: block,
-                l_max,
-                cdf,
-                cdf_w,
-                use_cdf_w: r > self.options.d_threshold,
-            });
-        }
+        let blocks = BlockRegions::new(&image, &self.options)
+            .map(|region| Block::new(&image, &self.options, region))
+            .collect::<Vec<_>>();
 
         // bilinear interpolation
         for y in 0..image.height {
@@ -288,38 +309,36 @@ fn stddev(pixels: impl Iterator<Item = u8>, mean: f32) -> f32 {
 }
 
 #[derive(Debug)]
-struct Blocks {
-    x: usize,
-    y: usize,
+struct BlockRegions {
+    start: Point,
     image_width: usize,
     image_height: usize,
     block_width: usize,
     block_height: usize,
 }
 
-impl Blocks {
-    fn new(pixels: usize, image_width: usize, block_width: usize, block_height: usize) -> Self {
+impl BlockRegions {
+    fn new<const N: usize>(image: &Image<N>, options: &AutomaticClaheOptions) -> Self {
         Self {
-            x: 0,
-            y: 0,
-            image_width,
-            image_height: pixels / image_width,
-            block_width,
-            block_height,
+            start: Point::new(0, 0),
+            image_width: image.width,
+            image_height: image.height,
+            block_width: options.block_width,
+            block_height: options.block_height,
         }
     }
 }
 
-impl Iterator for Blocks {
+impl Iterator for BlockRegions {
     type Item = Region;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.y == self.image_height {
+        if self.start.y == self.image_height {
             return None;
         }
 
-        let start = Point::new(self.x, self.y);
-        let mut end = Point::new(self.x + self.block_width, self.y + self.block_height);
+        let start = self.start;
+        let mut end = Point::new(start.x + self.block_width, start.y + self.block_height);
         if self.image_width < end.x + self.block_width {
             end.x = self.image_width;
         }
@@ -327,10 +346,10 @@ impl Iterator for Blocks {
             end.y = self.image_height;
         }
 
-        self.x = end.x;
-        if self.x == self.image_width {
-            self.x = 0;
-            self.y = end.y;
+        self.start.x = end.x;
+        if self.start.x == self.image_width {
+            self.start.x = 0;
+            self.start.y = end.y;
         }
 
         Some(Region { start, end })
@@ -379,11 +398,13 @@ impl Region {
         (self.end.y - self.start.y) * (self.end.x - self.start.x)
     }
 
-    fn pixels<T: Copy>(self, pixels: &[T]) -> impl '_ + Iterator<Item = T> {
+    fn items<T: Copy>(self, all_items: &[T]) -> impl '_ + Iterator<Item = T> {
         let width = self.end.x - self.start.x;
         (self.start.y..self.end.y).flat_map(move |y| {
             let offset = y * width;
-            (pixels[offset..][self.start.x..self.end.x]).iter().copied()
+            (all_items[offset..][self.start.x..self.end.x])
+                .iter()
+                .copied()
         })
     }
 }
@@ -421,37 +442,36 @@ impl Pdf {
     }
 
     fn to_weighting_distribution(&self) -> Self {
-        let mut max_intensity = self.0[0];
-        let mut min_intensity = self.0[0];
+        let mut max = self.0[0];
+        let mut min = self.0[0];
         for &x in &self.0[1..] {
-            max_intensity = max_intensity.max(x);
-            min_intensity = min_intensity.min(x);
+            max = max.max(x);
+            min = min.min(x);
         }
 
         let mut pdf_w = self.0;
-        let range = max_intensity - min_intensity + f32::EPSILON;
+        let range = max - min + f32::EPSILON;
         for x in &mut pdf_w {
-            *x = max_intensity * ((*x - min_intensity) / range);
+            *x = max * ((*x - min) / range);
         }
         Self(pdf_w)
     }
 
-    fn redistribute(&self, beta: f32) -> Self {
-        let mut pdf = self.0;
+    fn redistribute(mut self, clip_point: f32) -> Self {
         let mut exceeded = 0.0;
-        for x in &mut pdf {
-            if *x > beta {
-                exceeded += *x - beta;
-                *x = beta;
+        for x in &mut self.0 {
+            if *x > clip_point {
+                exceeded += *x - clip_point;
+                *x = clip_point;
             }
         }
         if exceeded > 0.0 {
             let offset = exceeded / 256.0;
-            for x in &mut pdf {
+            for x in &mut self.0 {
                 *x += offset;
             }
         }
-        Self(pdf)
+        self
     }
 }
 
