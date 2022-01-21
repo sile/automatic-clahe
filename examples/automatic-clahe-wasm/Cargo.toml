@@ -1,0 +1,12 @@
+[package]
+name = "automatic-clahe-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+automatic-clahe = { path = "../../" }
+wasm-bindgen = { version = "0.2" }

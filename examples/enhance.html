@@ -1,0 +1,173 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Automatic-CLAHE Example</title>
+  </head>
+  <body>
+    <h1>Automatic-CLAHE Example</h1>
+
+    This example enhances the contrast of images from your camera by using the Automatic-CLAHE algorithm.
+    <br />
+    NOTE: This example only supports Chromium-based browsers such as Chrome and Edge.
+
+    <h3>References</h3>
+
+    Paper: <a href="https://ieeexplore.ieee.org/abstract/document/8269243/">Automatic Contrast-Limited Adaptive Histogram Equalization With Dual Gamma Correction</a><br />
+    Rust Implementation: <a href="https://github.com/sile/automatic-clahe">https://github.com/sile/automatic-clahe</a><br />
+
+    <h3>Settings</h3>
+    Input Resolution: <select id="videoSize" size="1" onchange="showVideos()">
+                          <option value="320x240">320x240 (QVGA)</option>
+                          <option value="480x320">480x320 (HVGA)</option>
+                          <option value="640x480" selected>640x480 (VGA)</option>
+                          <option value="800x600">800x600 (SVGA)</option>
+                      </select><br />
+    Input FPS: <select id="videoFps" size="1" onchange="showVideos()">
+                  <option value="1">1</option>
+                  <option value="10" selected>10</option>
+                  <option value="30">30</option>
+    </select><br />
+    Camera: <select id="camera" size="1" onchange="showVideos()"></select><br />
+    Camera Zoom: <select id="cameraZoom" size="1" onchange="showVideos()">
+                  <option value="1" selected>1</option>
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                  <option value="8">8</option>
+    </select><br />
+    Output Mode: <select id="outputMode" size="1" onchange="showVideos()">
+                  <option value="twoVideos">Two Videos (first:original, second:enhanced)</option>
+                  <option value="interleave1s" selected>Interleave (1s)</option>
+                  <option value="interleave5s">Interleave (5s)</option>
+    </select><br />
+
+    <br />
+
+    <h3>Output</h3>
+    <span id="latency"></span><br />
+
+    <video id="video0" autoplay playsinline></video>
+    <video id="video1" autoplay playsinline></video>
+
+    <script>
+      navigator.mediaDevices.enumerateDevices().then((devices) => {
+          const videoDevices = devices.filter(device => device.kind === 'videoinput' && device.label);
+          const options = videoDevices.map(videoDevice => {
+              return `<option value="${videoDevice.deviceId}">${videoDevice.label}</option>`;
+          });
+          document.getElementById('camera').innerHTML = options.join('');
+      });
+    </script>
+
+    <script type="module">
+      import init, {enhance_rgba_image} from "./automatic-clahe-wasm/pkg/automatic_clahe_wasm.js";
+
+      (async () => { await init() })();
+
+      function getUserMedia() {
+          let width;
+          let height;
+          switch (document.getElementById("videoSize").value) {
+          case "320x240":
+              width = 320;
+              height = 240;
+              break;
+          case "480x320":
+              width = 480;
+              height = 320;
+              break;
+          case "640x480":
+              width = 640;
+              height = 480;
+              break;
+          case "800x600":
+              width = 800;
+              height = 600;
+              break;
+          }
+          const constraints = {
+              width: {exact: width},
+              height: {ideal: width},
+              zoom: document.getElementById('cameraZoom').value,
+              frameRate: {ideal: document.getElementById("videoFps").value},
+              deviceId: document.getElementById('camera').value,
+          };
+          return navigator.mediaDevices.getUserMedia({video: constraints});
+      }
+
+      function enhanceVideo(videoElement, do_enhance) {
+          getUserMedia().then((stream) => {
+              const track = stream.getVideoTracks()[0];
+              const canvas = new OffscreenCanvas(track.getSettings().width,
+                                                 track.getSettings().height);
+              const canvasCtx = canvas.getContext("2d", { desynchronized: true });
+
+              const generator = new MediaStreamTrackGenerator({ kind: "video" });
+              const processor = new MediaStreamTrackProcessor({ track });
+              let latencySum = 0;
+              let frames = 0;
+              let interleave;
+              let start = performance.now();
+              switch (document.getElementById('outputMode').value) {
+              case 'interleave1s':
+                  interleave = 1000;
+                  break;
+              case 'interleave5s':
+                  interleave = 5000;
+                  break;
+              }
+              processor.readable
+                  .pipeThrough(
+                      new TransformStream({
+                          transform: async (frame, controller) => {
+                              canvasCtx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+                              frame.close();
+
+                              const imageData = canvasCtx.getImageData(0, 0, canvas.width, canvas.height);
+
+                              if (do_enhance || (interleave && (performance.now() - start) % (interleave * 2) > interleave)) {
+                                  const now = performance.now();
+                                  enhance_rgba_image(imageData.data, canvas.width);
+                                  const elapsed = performance.now() - now;
+
+                                  latencySum += elapsed;
+                                  frames += 1;
+                                  document.getElementById('latency').innerText =
+                                      `Automatic-CLAHE Latency: ${elapsed.toFixed(1).padStart(4, '0')} ms, Average: ${(latencySum / frames).toFixed(1).padStart(4, '0')} ms`;
+                              }
+
+                              canvasCtx.putImageData(imageData, 0, 0);
+                              controller.enqueue(new VideoFrame(canvas));
+                          }
+                      })
+                  )
+                  .pipeTo(generator.writable)
+                  .catch((e) => {
+                      console.log("Error: ", e);
+                  });
+              videoElement.srcObject = new MediaStream([generator]);
+          });
+      }
+
+      function showVideos() {
+          const videoElement0 = document.getElementById('video0');
+          const videoElement1 = document.getElementById('video1');
+
+          if (document.getElementById('outputMode').value === 'twoVideos') {
+              enhanceVideo(videoElement0, false);
+              enhanceVideo(videoElement1, true);
+          } else {
+              enhanceVideo(videoElement0, false);
+              if (videoElement1.srcObject) {
+                  videoElement1.srcObject.getVideoTracks().forEach(track => {
+                      track.stop()
+                      videoElement.srcObject.removeTrack(track);
+                  });
+              }
+          }
+      }
+      window.showVideos = showVideos;
+
+      showVideos();
+    </script>
+  </body>
+</html>

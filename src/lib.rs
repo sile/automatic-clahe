@@ -2,11 +2,11 @@ mod color_format;
 
 #[derive(Debug, Clone)]
 pub struct AutomaticClaheOptions {
-    block_width: usize,
-    block_height: usize,
-    alpha: f32,
-    p: f32,
-    d_threshold: u8,
+    pub block_width: usize,
+    pub block_height: usize,
+    pub alpha: f32,
+    pub p: f32,
+    pub d_threshold: u8,
 }
 
 impl Default for AutomaticClaheOptions {
@@ -153,6 +153,10 @@ pub struct AutomaticClahe {
 }
 
 impl AutomaticClahe {
+    pub fn with_options(options: AutomaticClaheOptions) -> Self {
+        Self { options }
+    }
+
     pub fn new() -> Self {
         Self {
             options: Default::default(),
