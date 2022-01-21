@@ -46,10 +46,11 @@ impl<'a, const N: usize> Image<'a, N> {
         let cdf = Cdf::new(&pdf);
         let l_alpha = cdf.0.iter().take_while(|&&x| x <= 0.75).count() as f32;
 
+        let height = luminances.len() / width;
         Self {
             pixels,
             width,
-            height: luminances.len() / width,
+            height,
             luminances,
             l_max,
             enhancement_weight_factor: l_max / l_alpha,
@@ -107,6 +108,43 @@ impl Block {
             cdf_w,
         }
     }
+
+    fn center_y(&self) -> usize {
+        (self.region.end.y - self.region.start.y) / 2 + self.region.start.y
+    }
+
+    fn center_x(&self) -> usize {
+        (self.region.end.x - self.region.start.x) / 2 + self.region.start.x
+    }
+
+    fn enhance<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
+        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(1));
+        let enhanced_l = if self.enable_dual_gamma_correction {
+            let w_en = image.enhancement_weight_factor.powf(self.cdf.gamma_1(l));
+            let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
+            l1.max(l2)
+        } else {
+            l2
+        };
+        enhanced_l // TODO: range check
+    }
+}
+
+#[derive(Debug)]
+struct SurroundingBlocks<'a>(&'a ());
+
+impl<'a> Iterator for SurroundingBlocks<'a> {
+    type Item = (
+        Point,
+        Option<&'a Block>,
+        Option<&'a Block>,
+        Option<&'a Block>,
+        Option<&'a Block>,
+    );
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
@@ -127,13 +165,19 @@ impl AutomaticClahe {
             .map(|region| Block::new(&image, &self.options, region))
             .collect::<Vec<_>>();
 
-        // bilinear interpolation
+        let aligned_height = image.height / self.options.block_height * self.options.block_height;
+        let aligned_width = image.width / self.options.block_width * self.options.block_width;
+        let line_blocks = image.width / self.options.block_width;
         for y in 0..image.height {
+            let y0 = std::cmp::min(y, aligned_height - 1);
             for x in 0..image.width {
-                let a = self.get_block_a(y, x, width, height, &block_cdfs);
-                let b = self.get_block_b(y, x, width, height, &block_cdfs);
-                let c = self.get_block_c(y, x, width, height, &block_cdfs);
-                let d = self.get_block_d(y, x, width, height, &block_cdfs);
+                let x0 = std::cmp::min(x, aligned_width - 1);
+
+                let a = self.get_block_a(y0, x0, line_blocks, &blocks);
+                let b = self.get_block_b(y0, x0, aligned_width, line_blocks, &blocks);
+                let c = self.get_block_c(y0, x0, aligned_height, line_blocks, &blocks);
+                let d =
+                    self.get_block_d(y0, x0, aligned_height, aligned_width, line_blocks, &blocks);
 
                 let m = match (a.map(|a| a.center_y()), c.map(|c| c.center_y())) {
                     (Some(a), Some(c)) => (c - y) as f32 / (c - a) as f32,
@@ -180,132 +224,75 @@ impl AutomaticClahe {
 
     fn get_block_a<'a>(
         &self,
-        mut y: usize,
-        mut x: usize,
-        mut w: usize,
-        mut h: usize,
-        block_cdfs: &'a [BlockCdf],
-    ) -> Option<&'a BlockCdf> {
-        // TODO: handle edges correctly
-        h = h / self.options.block_height * self.options.block_height;
-        w = w / self.options.block_width * self.options.block_width;
-        y = std::cmp::min(y, h - 1);
-        x = std::cmp::min(x, w - 1);
-
+        y: usize,
+        x: usize,
+        line_blocks: usize,
+        blocks: &'a [Block],
+    ) -> Option<&'a Block> {
         if y < self.options.block_height / 2 || x < self.options.block_width / 2 {
-            return None;
+            None
+        } else {
+            let block_y = (y - self.options.block_height / 2) / self.options.block_height;
+            let block_x = (x - self.options.block_width / 2) / self.options.block_width;
+            Some(&blocks[block_y * line_blocks + block_x])
         }
-
-        let block_y = (y - self.options.block_height / 2) / self.options.block_height;
-        let block_x = (x - self.options.block_width / 2) / self.options.block_width;
-        let block_w = w / self.options.block_width;
-        Some(&block_cdfs[block_y * block_w + block_x])
     }
 
     fn get_block_b<'a>(
         &self,
-        mut y: usize,
-        mut x: usize,
-        mut w: usize,
-        mut h: usize,
-        block_cdfs: &'a [BlockCdf],
-    ) -> Option<&'a BlockCdf> {
-        // TODO: handle edges correctly
-        h = h / self.options.block_height * self.options.block_height;
-        w = w / self.options.block_width * self.options.block_width;
-        y = std::cmp::min(y, h - 1);
-        x = std::cmp::min(x, w - 1);
-
+        y: usize,
+        x: usize,
+        w: usize,
+        line_blocks: usize,
+        blocks: &'a [Block],
+    ) -> Option<&'a Block> {
         if y < self.options.block_height / 2 || w <= (x + self.options.block_width / 2) {
-            return None;
+            None
+        } else {
+            let block_y = (y - self.options.block_height / 2) / self.options.block_height;
+            let block_x = (x + self.options.block_width / 2) / self.options.block_width;
+            Some(&blocks[block_y * line_blocks + block_x])
         }
-
-        let block_y = (y - self.options.block_height / 2) / self.options.block_height;
-        let block_x = (x + self.options.block_width / 2) / self.options.block_width;
-        let block_w = w / self.options.block_width;
-        Some(&block_cdfs[block_y * block_w + block_x])
     }
 
     fn get_block_c<'a>(
         &self,
-        mut y: usize,
-        mut x: usize,
-        mut w: usize,
-        mut h: usize,
-        block_cdfs: &'a [BlockCdf],
-    ) -> Option<&'a BlockCdf> {
-        // TODO: handle edges correctly
-        h = h / self.options.block_height * self.options.block_height;
-        w = w / self.options.block_width * self.options.block_width;
-        y = std::cmp::min(y, h - 1);
-        x = std::cmp::min(x, w - 1);
-
+        y: usize,
+        x: usize,
+        h: usize,
+        line_blocks: usize,
+        blocks: &'a [Block],
+    ) -> Option<&'a Block> {
         if h <= (y + self.options.block_height / 2) || x < self.options.block_width / 2 {
-            return None;
+            None
+        } else {
+            let block_y = (y + self.options.block_height / 2) / self.options.block_height;
+            let block_x = (x - self.options.block_width / 2) / self.options.block_width;
+            Some(&blocks[block_y * line_blocks + block_x])
         }
-
-        let block_y = (y + self.options.block_height / 2) / self.options.block_height;
-        let block_x = (x - self.options.block_width / 2) / self.options.block_width;
-        let block_w = w / self.options.block_width;
-        Some(&block_cdfs[block_y * block_w + block_x])
     }
 
     fn get_block_d<'a>(
         &self,
-        mut y: usize,
-        mut x: usize,
-        mut w: usize,
-        mut h: usize,
-        block_cdfs: &'a [BlockCdf],
-    ) -> Option<&'a BlockCdf> {
-        // TODO: handle edges correctly
-        h = h / self.options.block_height * self.options.block_height;
-        w = w / self.options.block_width * self.options.block_width;
-        y = std::cmp::min(y, h - 1);
-        x = std::cmp::min(x, w - 1);
-
+        y: usize,
+        x: usize,
+        h: usize,
+        w: usize,
+        line_blocks: usize,
+        blocks: &'a [Block],
+    ) -> Option<&'a Block> {
         if h <= (y + self.options.block_height / 2) || w <= (x + self.options.block_width / 2) {
-            return None;
+            None
+        } else {
+            let block_y = (y + self.options.block_height / 2) / self.options.block_height;
+            let block_x = (x + self.options.block_width / 2) / self.options.block_width;
+            Some(&blocks[block_y * line_blocks + block_x])
         }
-
-        let block_y = (y + self.options.block_height / 2) / self.options.block_height;
-        let block_x = (x + self.options.block_width / 2) / self.options.block_width;
-        let block_w = w / self.options.block_width;
-        if block_y * block_w + block_x == block_cdfs.len() {
-            dbg!((y, x, h, w));
-            dbg!((block_y, block_w, block_x));
-            dbg!(block_y * block_w + block_x);
-        }
-        Some(&block_cdfs[block_y * block_w + block_x])
     }
 
     pub fn enhance_rgb_image(&self, _pixels: &mut [u8], _width: usize) {
         todo!()
     }
-}
-
-fn mean(pixels: impl Iterator<Item = u8>) -> f32 {
-    let mut sum = 0u32;
-    let mut count = 0u32;
-
-    for p in pixels {
-        sum += u32::from(p);
-        count += 1;
-    }
-
-    sum as f32 / count as f32
-}
-
-fn stddev(pixels: impl Iterator<Item = u8>, mean: f32) -> f32 {
-    let mut sum = 0.0f32;
-    let mut count = 0u32;
-
-    for p in pixels {
-        sum += (f32::from(p) - mean).powi(2);
-        count += 1;
-    }
-
-    (sum / count as f32).sqrt()
 }
 
 #[derive(Debug)]
@@ -353,37 +340,6 @@ impl Iterator for BlockRegions {
         }
 
         Some(Region { start, end })
-    }
-}
-
-#[derive(Debug)]
-pub struct BlockCdf {
-    cdf: Cdf,
-    cdf_w: Cdf,
-    use_cdf_w: bool, // TODO: rename
-    region: Region,
-    l_max: f32,
-}
-
-impl BlockCdf {
-    fn center_y(&self) -> usize {
-        (self.region.end.y - self.region.start.y) / 2 + self.region.start.y
-    }
-
-    fn center_x(&self) -> usize {
-        (self.region.end.x - self.region.start.x) / 2 + self.region.start.x
-    }
-
-    fn enhance<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
-        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(1));
-        let enhanced_l = if self.use_cdf_w {
-            let w_en = image.enhancement_weight_factor.powf(self.cdf.gamma_1(l));
-            let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
-            l1.max(l2)
-        } else {
-            l2
-        };
-        enhanced_l // TODO: range check
     }
 }
 
