@@ -118,7 +118,7 @@ impl Block {
     }
 
     fn enhance<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
-        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(1));
+        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(l));
         let enhanced_l = if self.enable_dual_gamma_correction {
             let w_en = image.enhancement_weight_factor.powf(self.cdf.gamma_1(l));
             let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
