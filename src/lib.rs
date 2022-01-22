@@ -65,6 +65,7 @@ struct Block {
     region: Region,
     cdf: Cdf,
     cdf_w: Cdf,
+    table: [f32; 256],
 }
 
 impl Block {
@@ -100,13 +101,18 @@ impl Block {
         let cdf = Cdf::new(&pdf);
         let cdf_w = Cdf::new(&pdf.to_weighting_distribution());
 
-        Self {
+        let mut this = Self {
             enable_dual_gamma_correction: (l_max - l_min) > options.d_threshold,
             l_max: f32::from(l_max),
             region,
             cdf,
             cdf_w,
+            table: [0.0; 256],
+        };
+        for l in 0..256 {
+            this.table[l] = this.enhance0(l as u8, image);
         }
+        this
     }
 
     fn center_y(&self) -> usize {
@@ -117,8 +123,12 @@ impl Block {
         (self.region.end.x - self.region.start.x) / 2 + self.region.start.x
     }
 
-    fn enhance<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
-        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(l));
+    fn enhance<const N: usize>(&self, l: u8, _image: &Image<N>) -> f32 {
+        self.table[usize::from(l)]
+    }
+
+    fn enhance0<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
+        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(1));
         let enhanced_l = if self.enable_dual_gamma_correction {
             let w_en = image.enhancement_weight_factor.powf(self.cdf.gamma_1(l));
             let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
@@ -126,7 +136,7 @@ impl Block {
         } else {
             l2
         };
-        enhanced_l // TODO: range check
+        enhanced_l
     }
 }
 
