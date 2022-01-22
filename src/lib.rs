@@ -56,6 +56,16 @@ impl<'a, const N: usize> Image<'a, N> {
             enhancement_weight_factor: l_max / l_alpha,
         }
     }
+
+    fn update_luminances(&mut self) {
+        for (i, p) in self.pixels.chunks_mut(N).enumerate() {
+            let (h, s, _) = self::color_format::rgb_to_hsv(p[0], p[1], p[2]);
+            let (r, g, b) = self::color_format::hsv_to_rgb(h, s, self.luminances[i]);
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -123,14 +133,16 @@ impl Block {
         (self.region.end.x - self.region.start.x) / 2 + self.region.start.x
     }
 
-    fn enhance<const N: usize>(&self, l: u8, _image: &Image<N>) -> f32 {
+    fn enhance(&self, l: u8) -> f32 {
         self.table[usize::from(l)]
     }
 
     fn enhance0<const N: usize>(&self, l: u8, image: &Image<N>) -> f32 {
-        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(1));
+        let l2 = image.l_max * (f32::from(l) / image.l_max).powf(self.cdf_w.gamma_2(l));
         let enhanced_l = if self.enable_dual_gamma_correction {
-            let w_en = image.enhancement_weight_factor.powf(self.cdf.gamma_1(l));
+            let w_en = image
+                .enhancement_weight_factor
+                .powf(1.0 - self.cdf.gamma_1(l));
             let l1 = self.l_max * w_en * self.cdf.0[usize::from(l)];
             l1.max(l2)
         } else {
@@ -174,7 +186,7 @@ impl AutomaticClahe {
     }
 
     pub fn enhance_rgba_image(&self, pixels: &mut [u8], width: usize) {
-        let image = Image::<4>::new(pixels, width);
+        let mut image = Image::<4>::new(pixels, width);
         let blocks = BlockRegions::new(&image, &self.options)
             .map(|region| Block::new(&image, &self.options, region))
             .collect::<Vec<_>>();
@@ -214,26 +226,18 @@ impl AutomaticClahe {
                     }
                 };
 
-                let l0 = image.luminances[y * width + x];
+                let i = y * width + x;
+                let l0 = image.luminances[i];
 
-                let la = a.map(|a| n * a.enhance(l0, &image)).unwrap_or(0.0);
-                let lb = b.map(|b| (1.0 - n) * b.enhance(l0, &image)).unwrap_or(0.0);
-                let lc = c.map(|c| n * c.enhance(l0, &image)).unwrap_or(0.0);
-                let ld = d.map(|d| (1.0 - n) * d.enhance(l0, &image)).unwrap_or(0.0);
+                let la = a.map(|a| n * a.enhance(l0)).unwrap_or(0.0);
+                let lb = b.map(|b| (1.0 - n) * b.enhance(l0)).unwrap_or(0.0);
+                let lc = c.map(|c| n * c.enhance(l0)).unwrap_or(0.0);
+                let ld = d.map(|d| (1.0 - n) * d.enhance(l0)).unwrap_or(0.0);
                 let l = m * (la + lb) + (1.0 - m) * (lc + ld);
-
-                let i = (y * width + x) * 4; // TODO
-                let (h, s, _) = self::color_format::rgb_to_hsv(
-                    image.pixels[i],
-                    image.pixels[i + 1],
-                    image.pixels[i + 2],
-                );
-                let (r, g, b) = self::color_format::hsv_to_rgb(h, s, l.max(0.0).min(255.0) as u8); // TODO
-                image.pixels[i] = r;
-                image.pixels[i + 1] = g;
-                image.pixels[i + 2] = b;
+                image.luminances[i] = l.max(0.0).min(255.0) as u8;
             }
         }
+        image.update_luminances();
     }
 
     fn get_block_a<'a>(

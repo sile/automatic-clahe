@@ -41,13 +41,13 @@
     </select><br />
 
     <br />
-    Automatic-CLAHE Block Size: <input id="block-size" type="range" min="8" max="128" value="32" step="2"
+    Automatic-CLAHE Block Size: <input id="block-size" type="range" min="8" max="128" value="64" step="2"
                         oninput="document.getElementById('block-size-value').innerText = document.getElementById('block-size').value">
-                 <span id="block-size-value">32</span><br />
-    Automatic-CLAHE Alpha: <input id="alpha" type="range" min="0" max="200" value="100" step="1"
+                 <span id="block-size-value">64</span><br />
+    Automatic-CLAHE Alpha: <input id="alpha" type="range" min="0" max="500" value="100" step="1"
                         oninput="document.getElementById('alpha-value').innerText = document.getElementById('alpha').value">
                  <span id="alpha-value">100</span><br />
-    Automatic-CLAHE P: <input id="P" type="range" min="0" max="5" value="1.5" step="0.1"
+    Automatic-CLAHE P: <input id="P" type="range" min="1" max="40" value="1.5" step="0.5"
                         oninput="document.getElementById('P-value').innerText = document.getElementById('P').value">
                  <span id="P-value">1.5</span><br />
     Automatic-CLAHE D Threshold: <input id="d-threshold" type="range" min="0" max="255" value="50" step="1"
